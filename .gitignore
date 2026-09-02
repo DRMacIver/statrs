@@ -22,3 +22,6 @@ tests/*.dat
 
 # macOS
 .DS_Store
+
+# Hegel property-testing failure database
+.hegel/

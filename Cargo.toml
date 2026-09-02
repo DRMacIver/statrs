@@ -59,6 +59,7 @@ optional = true
 [dev-dependencies]
 criterion = "0.8"
 anyhow = "1.0"
+hegeltest = { version = "0.35.0", features = ["rand"] }
 
 [dev-dependencies.nalgebra]
 version = "0.35"

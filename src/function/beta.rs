@@ -527,7 +527,274 @@ mod tests {
     use super::*;
     use crate::prec;
     use core::f64::consts as f64_consts;
+    use hegel::generators::{self, Generator as _};
     const MODULE_RELATIVE_ACC: f64 = 1e-14;
+
+    /// A magnitude drawn log-uniformly from `[10^lo, 10^hi]`. Beta parameters
+    /// span many decades, which a uniform float generator would barely
+    /// explore.
+    fn log_uniform(tc: &hegel::TestCase, lo: f64, hi: f64) -> f64 {
+        10f64.powf(tc.draw(generators::floats::<f64>().min_value(lo).max_value(hi)))
+    }
+
+    /// Relative accuracy `beta` — or anything else built by exponentiating a
+    /// sum of `ln_gamma` values — can deliver at `(a, b)`.
+    ///
+    /// `ln_beta` is `ln_gamma(a) + ln_gamma(b) - ln_gamma(a+b)`, whose terms
+    /// grow like `a*ln(a)` while their sum stays small, so the rounding of the
+    /// large terms survives as an absolute error in the exponent and hence a
+    /// relative error in the exponentiated result.
+    fn log_cancellation_scale(a: f64, b: f64) -> f64 {
+        256.0
+            * f64::EPSILON
+            * (1.0
+                + gamma::ln_gamma(a).abs()
+                + gamma::ln_gamma(b).abs()
+                + gamma::ln_gamma(a + b).abs())
+    }
+
+    /// An `x` in `[0, 1]` whose complement `1 - x` is exact, so that the two
+    /// sides of the reflection identity below are evaluated at genuinely
+    /// complementary points. A uniformly drawn `x` below 2^-53 has no
+    /// representable complement at all — `1.0 - x` rounds to 1 — which reads
+    /// as a catastrophic identity failure but is the test's own arithmetic.
+    fn dyadic_unit_interval(tc: &hegel::TestCase) -> f64 {
+        const GRID: u64 = 1 << 52;
+        tc.draw(hegel::one_of!(
+            generators::integers::<u64>()
+                .max_value(GRID)
+                .map(|m| m as f64 / GRID as f64),
+            generators::integers::<i32>()
+                .min_value(1)
+                .max_value(52)
+                .map(|k| 2f64.powi(-k)),
+            generators::integers::<i32>()
+                .min_value(1)
+                .max_value(52)
+                .map(|k| 1.0 - 2f64.powi(-k)),
+        ))
+    }
+
+    /// `B(a+1, b) = B(a, b) * a / (a+b)`, the beta function's recurrence in its
+    /// first parameter.
+    ///
+    /// Both sides are required to be normal: `beta` underflows into the
+    /// subnormal range once `a + b` reaches a few hundred, where a relative
+    /// comparison measures the subnormal grid rather than `beta`.
+    #[hegel::test]
+    fn beta_satisfies_the_recurrence_in_its_first_parameter(tc: hegel::TestCase) {
+        let a = log_uniform(&tc, -8.0, 8.0);
+        let b = log_uniform(&tc, -8.0, 8.0);
+        let expected = beta(a, b) * a / (a + b);
+        let normal = |v: f64| v.is_finite() && v >= f64::MIN_POSITIVE;
+        tc.assume(normal(expected) && normal(beta(a + 1.0, b)));
+        prec::assert_relative_eq!(
+            beta(a + 1.0, b),
+            expected,
+            epsilon = 0.0,
+            max_relative = log_cancellation_scale(a, b)
+        );
+    }
+
+    /// `I_x(a,b) + I_{1-x}(b,a) = 1`: the regularized incomplete beta function
+    /// splits the total mass between the two tails. `checked_beta_reg` chooses
+    /// between the direct continued fraction and the complementary one by
+    /// comparing `x` against `(a+1)/(a+b+2)`, so the two calls here generally
+    /// take different branches and the identity relates them.
+    ///
+    /// Tolerance: `beta_continued_fraction` stops at a relative increment of
+    /// `F64_PREC` and both terms lie in `[0, 1]`, which sets the 1e-11 floor;
+    /// at extreme shapes the `ln_gamma` cancellation dominates (3.6e-7 at
+    /// `b = 1e8`, within the scale below).
+    #[hegel::test]
+    fn beta_reg_splits_the_mass_between_the_two_tails(tc: hegel::TestCase) {
+        let a = log_uniform(&tc, -8.0, 8.0);
+        let b = log_uniform(&tc, -8.0, 8.0);
+        let x = dyadic_unit_interval(&tc);
+        // The continued fraction gives up after 100_000 steps for extreme
+        // shapes, which the docs list as an error rather than a value.
+        let (lower, upper) = (checked_beta_reg(a, b, x), checked_beta_reg(b, a, 1.0 - x));
+        tc.assume(lower.is_ok() && upper.is_ok());
+        prec::assert_abs_diff_eq!(
+            lower.unwrap() + upper.unwrap(),
+            1.0,
+            epsilon = 1e-11 + log_cancellation_scale(a, b)
+        );
+    }
+
+    /// `I_.(a,b)` is the cdf of a beta distribution, hence non-decreasing in
+    /// `x`. An ordering, so no tolerance is involved, and it must hold across
+    /// the branch boundary at `(a+1)/(a+b+2)` where the implementation
+    /// switches to the complementary continued fraction.
+    #[hegel::test]
+    fn beta_reg_is_nondecreasing_in_x(tc: hegel::TestCase) {
+        let a = log_uniform(&tc, -8.0, 8.0);
+        let b = log_uniform(&tc, -8.0, 8.0);
+        let x1 = tc.draw(generators::floats::<f64>().min_value(0.0).max_value(1.0));
+        let x2 = tc.draw(generators::floats::<f64>().min_value(0.0).max_value(1.0));
+        let (lo, hi) = if x1 <= x2 { (x1, x2) } else { (x2, x1) };
+        assert!(
+            beta_reg(a, b, lo) <= beta_reg(a, b, hi),
+            "beta_reg({a:e}, {b:e}, {lo}) = {} > beta_reg({a:e}, {b:e}, {hi}) = {}",
+            beta_reg(a, b, lo),
+            beta_reg(a, b, hi)
+        );
+    }
+
+    /// `I_x(a,b)` is a probability.
+    #[hegel::test]
+    fn beta_reg_lies_in_the_unit_interval(tc: hegel::TestCase) {
+        let a = log_uniform(&tc, -8.0, 8.0);
+        let b = log_uniform(&tc, -8.0, 8.0);
+        let x = tc.draw(generators::floats::<f64>().min_value(0.0).max_value(1.0));
+        let p = beta_reg(a, b, x);
+        assert!(
+            (0.0..=1.0).contains(&p),
+            "beta_reg({a:e}, {b:e}, {x}) = {p:.17e}"
+        );
+    }
+
+    /// At integer shapes, `I_x(a, b)` is the probability that a binomial with
+    /// `a+b-1` trials and success probability `x` sees at least `a` successes.
+    /// The oracle is a finite sum of positive terms with no cancellation and
+    /// shares no code with the continued fraction.
+    ///
+    /// Shapes are held below 40 so the oracle's terms stay well scaled; worst
+    /// observed absolute disagreement 2.2e-13.
+    #[hegel::test]
+    fn beta_reg_matches_the_binomial_tail_at_integer_shapes(tc: hegel::TestCase) {
+        let a = tc.draw(generators::integers::<u32>().min_value(1).max_value(40));
+        let b = tc.draw(generators::integers::<u32>().min_value(1).max_value(40));
+        let x = tc.draw(generators::floats::<f64>().min_value(0.0).max_value(1.0));
+        let trials = a + b - 1;
+        let expected: f64 = (a..=trials)
+            .map(|k| {
+                crate::function::factorial::binomial(u64::from(trials), u64::from(k))
+                    * x.powi(k as i32)
+                    * (1.0 - x).powi((trials - k) as i32)
+            })
+            .sum();
+        prec::assert_abs_diff_eq!(
+            beta_reg(f64::from(a), f64::from(b), x),
+            expected,
+            epsilon = 1e-11
+        );
+    }
+
+    /// `inv_beta_reg` recovers the tail mass it was asked for. The check is on
+    /// the smaller of `p` and `1-p`, so a deep tail is resolved rather than
+    /// swamped by the rounding of a value near 1.
+    ///
+    /// Both shapes are held above 2. AS 109's Carter starting approximation
+    /// applies above 1, but only becomes usable from about 2: at shape 1.41 the
+    /// recovered tail mass is 21x too large, pinned by
+    /// `inv_beta_reg_is_far_from_the_quantile_for_a_small_shape`. The 2e-2
+    /// tolerance is what the AS 64 stop criterion delivers inside the kept
+    /// region (worst observed 2.5e-3 over shapes to 1e6 and tail masses to
+    /// 1e-15); it is a fence against gross breakage, not a claim of accuracy.
+    #[hegel::test]
+    fn inv_beta_reg_recovers_the_tail_mass(tc: hegel::TestCase) {
+        let a = log_uniform(&tc, 0.31, 6.0);
+        let b = log_uniform(&tc, 0.31, 6.0);
+        // Deeper tails reach a panic and a non-terminating loop; see the
+        // pinned reproducers below.
+        let tail = log_uniform(&tc, -15.0, -0.302);
+        let p = if tc.draw(generators::booleans()) {
+            tail
+        } else {
+            1.0 - tail
+        };
+        let x = inv_beta_reg(a, b, p);
+        let back = beta_reg(a, b, x);
+        prec::assert_relative_eq!(
+            back.min(1.0 - back),
+            p.min(1.0 - p),
+            epsilon = 0.0,
+            max_relative = 2e-2
+        );
+    }
+
+    /// `checked_beta_reg` reports a domain error exactly when a shape is not
+    /// positive or `x` lies outside `[0, 1]`. Two-sided: rejecting a valid
+    /// argument is as wrong as accepting an invalid one. A continued fraction
+    /// that fails to converge is a separate documented error, not a domain
+    /// error.
+    ///
+    /// The documented conditions are `a <= 0`, `b <= 0` and `x` outside
+    /// `[0, 1]`. A NaN shape satisfies none of them and is passed through
+    /// (giving a NaN result), while a NaN `x` fails the range test and is
+    /// rejected; the expectation below transcribes that asymmetry rather than
+    /// asserting a preference between the two.
+    #[hegel::test]
+    fn checked_beta_reg_reports_a_domain_error_exactly_outside_its_domain(tc: hegel::TestCase) {
+        fn arg(tc: &hegel::TestCase) -> f64 {
+            tc.draw(hegel::one_of!(
+                generators::sampled_from(vec![
+                    0.0,
+                    -0.0,
+                    1.0,
+                    f64::NAN,
+                    f64::INFINITY,
+                    f64::NEG_INFINITY,
+                ]),
+                generators::floats::<f64>().min_value(-2.0).max_value(2.0),
+            ))
+        }
+        let a = arg(&tc);
+        let b = arg(&tc);
+        let x = arg(&tc);
+        let out_of_domain = a <= 0.0 || b <= 0.0 || !(0.0..=1.0).contains(&x);
+        let result = checked_beta_reg(a, b, x);
+        let domain_error = matches!(
+            result,
+            Err(BetaFuncError::ANotGreaterThanZero
+                | BetaFuncError::BNotGreaterThanZero
+                | BetaFuncError::XOutOfRange)
+        );
+        assert_eq!(
+            domain_error, out_of_domain,
+            "checked_beta_reg({a:e}, {b:e}, {x:e}) = {result:?}"
+        );
+    }
+
+    /// KNOWN BUG (#435, issue 3): `inv_beta_reg`'s AS 64 iteration stops far from
+    /// the quantile for shapes near or below 1 — here it returns a point whose
+    /// regularized incomplete beta is 0.23 rather than the requested 0.5, and
+    /// at `(1.41, 7.1e5)` with `p = 1e-15` the recovered tail mass is 21x too
+    /// large. Reached through `Beta::inverse_cdf` and
+    /// `StudentsT::inverse_cdf`. `inv_beta_reg_recovers_the_tail_mass` keeps
+    /// both shapes above 2.
+    #[test]
+    #[ignore = "known bug: AS 64 iteration stalls for a shape near or below 1"]
+    fn inv_beta_reg_is_far_from_the_quantile_for_a_small_shape() {
+        let x = inv_beta_reg(1.0, 0.01, 0.5);
+        prec::assert_abs_diff_eq!(beta_reg(1.0, 0.01, x), 0.5, epsilon = 1e-3);
+    }
+
+    /// KNOWN BUG (#435, issue 1): `inv_beta_reg` panics for a deep tail probability.
+    /// Its Newton iterate leaves `[0, 1]` and is then passed to `beta_reg`,
+    /// which rejects it; the `unwrap` inside `beta_reg` turns that into a
+    /// panic. Reached through `Beta::try_inverse_cdf`, whose contract is to
+    /// report failure without panicking.
+    #[test]
+    #[ignore = "known bug: panics on a probability inside [0, 1]"]
+    fn inv_beta_reg_panics_for_a_deep_tail_probability() {
+        let x = inv_beta_reg(2.0, 3.0, 1e-300);
+        assert!(
+            (0.0..=1.0).contains(&x),
+            "inv_beta_reg(2, 3, 1e-300) = {x:e}"
+        );
+    }
+
+    /// KNOWN BUG (#435, issue 2): `inv_beta_reg` does not return for a large first
+    /// shape and a deep tail probability — the AS 64 loop has no iteration cap
+    /// and makes no progress. Ignored because it would hang the suite.
+    #[test]
+    #[ignore = "known bug: does not terminate; would hang the suite"]
+    fn inv_beta_reg_does_not_terminate_for_a_large_shape_and_a_deep_tail() {
+        let x = inv_beta_reg(1e5, 2.0, 1e-100);
+        assert!((0.0..=1.0).contains(&x));
+    }
 
     fn beta_assert_relative_eq(a: f64, b: f64) {
         prec::assert_relative_eq!(

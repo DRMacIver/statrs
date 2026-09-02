@@ -420,6 +420,7 @@ mod tests {
     use super::*;
     use crate::distribution::internal::density_util;
     use crate::distribution::internal::testing_boiler;
+    use crate::prec;
 
     testing_boiler!(freedom_1: f64, freedom_2: f64; FisherSnedecor; FisherSnedecorError);
 
@@ -644,5 +645,36 @@ mod tests {
     #[test]
     fn test_continuous() {
         density_util::check_continuous_distribution(&create_ok(10.0, 10.0), 0.0, 10.0);
+    }
+
+    /// KNOWN BUG (#462): `FisherSnedecor::cdf` and `sf` do not sum to 1 —
+    /// here to 1.98. `sf` builds its argument as
+    /// `1 - d1*x/(d1*x + d2)` by subtraction, and for a small ratio that
+    /// rounds to exactly 1, where `beta_reg` returns 1; meanwhile `cdf` is
+    /// 0.98 because a tiny first shape makes `t^(d1/2)` close to 1. The
+    /// complement is `d2/(d1*x + d2)`, which is exact.
+    /// `internal::hegel_props::sf_is_the_complement_of_cdf` excludes the zone.
+    #[test]
+    #[ignore = "known bug: sf loses its complement argument to rounding"]
+    fn cdf_and_sf_do_not_sum_to_one() {
+        let d = create_ok(0.001, 1000.0);
+        let sum = d.cdf(1e-15) + d.sf(1e-15);
+        prec::assert_abs_diff_eq!(sum, 1.0, epsilon = 1e-11);
+    }
+
+    /// KNOWN BUG (unfiled): a `FisherSnedecor` sample is NaN for tiny degrees
+    /// of freedom. The sampler divides one gamma sample by another and both
+    /// underflow to zero.
+    /// `internal::hegel_props::a_sample_lies_within_the_support` keeps the
+    /// freedoms in `[0.1, 10]`.
+    #[cfg(feature = "rand")]
+    #[test]
+    #[ignore = "known bug: sample is NaN for tiny degrees of freedom"]
+    fn sample_is_nan_for_a_tiny_freedom() {
+        use rand::SeedableRng;
+        let d = create_ok(0.0025, 0.0017);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(3);
+        let sample = ::rand::distr::Distribution::sample(&d, &mut rng);
+        assert!(!sample.is_nan(), "FisherSnedecor(0.0025, 0.0017) sampled {sample}");
     }
 }

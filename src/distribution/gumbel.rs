@@ -558,4 +558,34 @@ mod tests {
         test_exact(-2.0, f64::INFINITY, 0.0_f64.ln(), ln_pdf(1.0));
         test_exact(-2.0, f64::INFINITY, 0.0_f64.ln(), ln_pdf(5.0));
     }
+
+    /// KNOWN BUG (#453): `Gumbel::pdf` returns NaN in its left tail. It
+    /// multiplies `exp(z)` by `exp(-exp(z))` with `z = (location - x)/scale`;
+    /// once `exp(z)` overflows the product is `inf * 0`, where the true
+    /// density is 0. `internal::hegel_props::pdf_is_nonnegative` excludes the
+    /// zone.
+    #[test]
+    #[ignore = "known bug: pdf is NaN where the density underflows to zero"]
+    fn pdf_is_nan_in_the_left_tail() {
+        let d = create_ok(0.0, 0.001);
+        assert!(d.pdf(-1.0) >= 0.0, "Gumbel(0, 0.001).pdf(-1) = {}", d.pdf(-1.0));
+    }
+
+    /// KNOWN BUG (#461): every `Gumbel` sample is NaN. The sampler computes
+    /// `location - scale * ((-x).ln()).ln()` for a uniform `x` in `[0, 1)`,
+    /// but the Gumbel quantile is `location - scale * ln(-ln(x))`: the
+    /// negation belongs inside the *outer* logarithm, so `(-x).ln()` takes the
+    /// log of a negative number.
+    /// `internal::hegel_props::a_sample_lies_within_the_support` excludes the
+    /// family.
+    #[cfg(feature = "rand")]
+    #[test]
+    #[ignore = "known bug: every sample is NaN"]
+    fn every_sample_is_nan() {
+        use rand::SeedableRng;
+        let d = create_ok(0.0, 1.0);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(0);
+        let sample = ::rand::distr::Distribution::sample(&d, &mut rng);
+        assert!(!sample.is_nan(), "Gumbel(0, 1) sampled {sample}");
+    }
 }

@@ -743,4 +743,20 @@ mod tests {
         density_util::check_continuous_distribution(&create_ok(1.2, 3.4), 0.0, 1.0);
         density_util::check_continuous_distribution(&create_ok(4.5, 6.7), 0.0, 1.0);
     }
+
+    /// KNOWN BUG (#435, issue 1, reached through the `try_` variant):
+    /// `Beta::try_inverse_cdf` panics on a probability inside `[0, 1]`. The
+    /// `try_` variant exists to report failure rather than panic, and its
+    /// error type describes only an argument outside `[0, 1]`, but
+    /// `inv_beta_reg`'s Newton iterate leaves `[0, 1]` for a deep tail
+    /// probability and the `unwrap` inside `beta_reg` panics.
+    /// `StudentsT::inverse_cdf` reaches the same path.
+    /// `internal::hegel_props::inverse_cdf_lies_within_the_support` keeps the
+    /// tail probability above 1e-10.
+    #[test]
+    #[ignore = "known bug: try_inverse_cdf panics on a probability in [0, 1]"]
+    fn try_inverse_cdf_panics_for_a_deep_tail_probability() {
+        let d = create_ok(2.0, 3.0);
+        assert!(d.try_inverse_cdf(1e-300).is_ok());
+    }
 }

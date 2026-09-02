@@ -598,4 +598,17 @@ mod tests {
     fn test_inverse_cdf_p_below_zero() {
         create_ok(3).inverse_cdf(-1e-300);
     }
+
+    /// KNOWN BUG (unfiled): `Chi::cdf` panics for a tiny positive argument. It
+    /// passes `x * x / 2` to `gamma_lr`, which rejects a second argument
+    /// outside `(0, inf)`, so an `x` whose square underflows takes the
+    /// `unwrap` inside `gamma_lr` down with it. The same product overflowing
+    /// for a large `x` panics too.
+    /// `internal::hegel_props::cdf_is_nondecreasing` excludes the zone.
+    #[test]
+    #[ignore = "known bug: cdf panics when x * x under- or overflows"]
+    fn cdf_panics_for_a_tiny_argument() {
+        let d = create_ok(1000);
+        assert!((0.0..=1.0).contains(&d.cdf(1e-165)));
+    }
 }

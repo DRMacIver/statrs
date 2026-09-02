@@ -597,4 +597,50 @@ mod tests {
     fn test_inverse_cdf_p_below_zero() {
         create_ok(1.0, 1.0).inverse_cdf(-1e-300);
     }
+
+    /// KNOWN BUG (#453): `InverseGamma::pdf` is NaN near zero. Its
+    /// `shape == 1` branch divides `rate` by `x * x`, which has underflowed to
+    /// zero, and multiplies the resulting infinity by an underflowed
+    /// `exp(-rate/x)`. The general branch fails the same way once
+    /// `Gamma(shape)` overflows. The true density is 0.
+    /// `internal::hegel_props::pdf_is_nonnegative` excludes the zone.
+    #[test]
+    #[ignore = "known bug: pdf is NaN where the density underflows to zero"]
+    fn pdf_is_nan_near_zero() {
+        let d = create_ok(1.0, 1.0);
+        assert!(
+            d.pdf(1e-155) >= 0.0,
+            "InverseGamma(1, 1).pdf(1e-155) = {}",
+            d.pdf(1e-155)
+        );
+    }
+
+    /// KNOWN BUG (#453, and #464 for the consequence): `InverseGamma::pdf` overflows to infinity for a
+    /// shape of a few hundred, where the true density is a moderate finite
+    /// number. It multiplies out
+    /// `rate^shape * x^(-shape-1) * exp(-rate/x)` before dividing by
+    /// `Gamma(shape)`, and the numerator alone exceeds `f64::MAX` long before
+    /// the quotient does.
+    #[test]
+    #[ignore = "known bug: pdf overflows before dividing by Gamma(shape)"]
+    fn pdf_overflows_for_a_moderate_shape() {
+        let d = create_ok(151.0, 4.5);
+        let mode = 4.5 / 152.0;
+        assert!(d.pdf(mode).is_finite(), "pdf({mode}) = {}", d.pdf(mode));
+    }
+
+    /// KNOWN BUG (#464): `InverseGamma::inverse_cdf` stops nowhere near the
+    /// quantile once `pdf` has overflowed (see
+    /// `pdf_overflows_for_a_moderate_shape`): the Newton step in
+    /// `newton_raphson_quantile` divides by an infinite density, so it never
+    /// moves and the bracket search's last point is returned.
+    /// `internal::hegel_props::inverse_cdf_is_nondecreasing_in_p` excludes
+    /// shapes whose density at the mode is infinite.
+    #[test]
+    #[ignore = "known bug: inverse_cdf returns the bracket point when pdf overflows"]
+    fn inverse_cdf_collapses_when_the_density_overflows() {
+        let d = create_ok(151.0, 4.5);
+        let q = d.inverse_cdf(0.9);
+        prec::assert_abs_diff_eq!(d.cdf(q), 0.9, epsilon = 1e-6);
+    }
 }

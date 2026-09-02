@@ -515,4 +515,27 @@ mod tests {
         let invcdf = |arg: f64| move |x: NegativeBinomial| x.inverse_cdf(arg);
         test_exact(3.0, 0.5, u64::MAX, invcdf(1.));
     }
+
+    /// KNOWN BUG (#463): `NegativeBinomial::pmf` is NaN for a certain
+    /// success. With `p = 1` every trial succeeds, so all the mass sits at
+    /// `k = 0`; the pmf instead evaluates `0^0` through a power of `1 - p` and
+    /// comes back NaN. `p = 1` is inside the range `new` accepts.
+    /// `internal::hegel_props::discrete_pmf_sums_to_cdf` excludes it.
+    #[test]
+    #[ignore = "known bug: pmf is NaN when p is 1"]
+    fn pmf_is_nan_for_a_certain_success() {
+        let d = create_ok(1.0, 1.0);
+        assert_eq!(d.pmf(0), 1.0);
+    }
+
+    /// KNOWN BUG (unfiled): `NegativeBinomial::pmf` rounds two ulps above 1
+    /// for a near-certain success, so the returned value is not a
+    /// probability. `internal::hegel_props::discrete_pmf_sums_to_cdf` allows
+    /// four ulps for exactly this.
+    #[test]
+    #[ignore = "known bug: pmf exceeds 1 by two ulps"]
+    fn pmf_exceeds_one_for_a_near_certain_success() {
+        let d = create_ok(1.0, 1.0 - f64::EPSILON / 2.0);
+        assert!(d.pmf(0) <= 1.0, "pmf(0) = {:.17e}", d.pmf(0));
+    }
 }

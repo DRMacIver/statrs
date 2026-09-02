@@ -884,4 +884,48 @@ mod tests {
         density_util::check_continuous_distribution(&create_ok(1.0, 0.5), 0.0, 20.0);
         density_util::check_continuous_distribution(&create_ok(9.0, 2.0), 0.0, 20.0);
     }
+
+    /// KNOWN BUG (unfiled): `Gamma::cdf` panics when `x * rate` under- or
+    /// overflows. It checks `x <= 0` and then hands the product to `gamma_lr`,
+    /// which rejects a second argument outside `(0, inf)`; `x = 1e-300` is a
+    /// positive, in-support argument. `ChiSquared` and `Erlang` inherit it.
+    /// `internal::hegel_props::cdf_is_nondecreasing` excludes the zone.
+    #[test]
+    #[ignore = "known bug: cdf panics when x * rate under- or overflows"]
+    fn cdf_panics_when_x_times_rate_underflows() {
+        let d = create_ok(2.0, 1e-300);
+        assert!((0.0..=1.0).contains(&d.cdf(1e-300)));
+    }
+
+    /// KNOWN BUG (unfiled): `Gamma::inverse_cdf` cannot resolve a quantile
+    /// below ~1e-9. Its safeguarded Newton loop stops through
+    /// `prec::convergence`, whose epsilon is 1e-9 *absolute*, so the search
+    /// halts long before reaching a tiny quantile. The median of
+    /// `Gamma(0.01, 1)` is around 1e-31; `inverse_cdf(0.5)` returns 9.3e-10,
+    /// whose cdf is 0.86. `ChiSquared` and `Erlang` inherit it.
+    /// `internal::hegel_props::inverse_cdf_is_nondecreasing_in_p` skips
+    /// quantiles below 1e-8.
+    #[test]
+    #[ignore = "known bug: the Newton stop is 1e-9 absolute"]
+    fn inverse_cdf_is_far_from_a_tiny_quantile() {
+        let d = create_ok(0.01, 1.0);
+        let x = d.inverse_cdf(0.5);
+        prec::assert_abs_diff_eq!(d.cdf(x), 0.5, epsilon = 1e-3);
+    }
+
+    /// KNOWN BUG (unfiled): `Gamma::inverse_cdf` returns whatever it last held
+    /// when it runs out of iterations, without saying so. In a power-law lower
+    /// tail the safeguarded Newton step advances by a bounded factor per
+    /// iteration, so reaching a tail probability `p` takes about `|ln p|`
+    /// steps, and `MAX_ITERATIONS` is 100. Here the returned point's cdf is
+    /// 27 orders of magnitude away from the `p` that was asked for.
+    /// `internal::hegel_props::inverse_cdf_is_nondecreasing_in_p` keeps the
+    /// tail probability above 1e-10.
+    #[test]
+    #[ignore = "known bug: iteration exhaustion is silent"]
+    fn inverse_cdf_exhausts_its_iterations() {
+        let d = create_ok(1000.0, 0.001);
+        let x = d.inverse_cdf(1e-260);
+        prec::assert_relative_eq!(d.cdf(x), 1e-260, epsilon = 0.0, max_relative = 1e-3);
+    }
 }

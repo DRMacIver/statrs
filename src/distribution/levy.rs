@@ -741,4 +741,15 @@ mod tests {
             328.2932192553111008237465284764766693115234375,
         );
     }
+
+    /// KNOWN BUG (#453): `Levy::pdf` is NaN just above its location. It
+    /// divides `exp(-c/(2*(x - mu)))` — already underflowed to zero — by
+    /// `(x - mu)^1.5`, which has underflowed to zero as well. The true density
+    /// is 0 there. `internal::hegel_props::pdf_is_nonnegative` excludes the zone.
+    #[test]
+    #[ignore = "known bug: pdf is NaN where the density underflows to zero"]
+    fn pdf_is_nan_just_above_the_location() {
+        let d = create_ok(0.0, 1.0);
+        assert!(d.pdf(1e-320) >= 0.0, "Levy(0, 1).pdf(1e-320) = {}", d.pdf(1e-320));
+    }
 }

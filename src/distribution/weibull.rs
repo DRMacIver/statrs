@@ -563,4 +563,23 @@ mod tests {
     fn test_continuous() {
         density_util::check_continuous_distribution(&create_ok(1.0, 0.2), 0.0, 10.0);
     }
+
+    /// KNOWN BUG (#465): `Weibull::new` precomputes `scale^-shape`, and
+    /// once that overflows or underflows the cdf and the density are NaN
+    /// across the whole support — the cdf forms
+    /// `-(-x^shape * scale^-shape).exp_m1()`, which is `0 * inf` at `x = 0`.
+    /// `Weibull(110, 0.001)` is such a pair, and `mean()` still returns the
+    /// right value for it, so the distribution itself is well defined.
+    /// `internal::hegel_props::cdf_lies_in_the_unit_interval` excludes the
+    /// zone.
+    #[test]
+    #[ignore = "known bug: cdf and pdf are NaN when scale^-shape overflows"]
+    fn cdf_is_nan_when_the_precomputed_power_overflows() {
+        let d = create_ok(110.0, 0.001);
+        assert!(
+            (0.0..=1.0).contains(&d.cdf(0.0)),
+            "Weibull(110, 0.001).cdf(0) = {}",
+            d.cdf(0.0)
+        );
+    }
 }

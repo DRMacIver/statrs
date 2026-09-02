@@ -553,4 +553,19 @@ mod tests {
         density_util::check_continuous_distribution(&create_ok(1.0, 10.0), 1.0, 10.0);
         density_util::check_continuous_distribution(&create_ok(0.1, 2.0), 0.1, 100.0);
     }
+
+    /// KNOWN BUG (#453): `Pareto::pdf` is NaN for a large argument. It
+    /// forms `shape * scale^shape / x^(shape+1)`, and both powers overflow to
+    /// infinity, leaving `inf / inf`. The true density is a representable tiny
+    /// number. `internal::hegel_props::pdf_is_nonnegative` excludes the zone.
+    #[test]
+    #[ignore = "known bug: pdf is NaN when its two powers both overflow"]
+    fn pdf_is_nan_for_a_large_argument() {
+        let d = create_ok(1000.0, 1000.0);
+        assert!(
+            d.pdf(1e105) >= 0.0,
+            "Pareto(1000, 1000).pdf(1e105) = {}",
+            d.pdf(1e105)
+        );
+    }
 }

@@ -638,4 +638,15 @@ mod tests {
         test_exact(100, 2, 5, 0, invcdf(0.5));
     }
 
+    /// KNOWN BUG (unfiled): `Hypergeometric::cdf` exceeds 1 — by 8.2e-13 here,
+    /// and it then comes back down at the next point, so the cdf is also not
+    /// monotone. The sum of the pmf is not clamped.
+    /// `internal::hegel_props::discrete_cdf_lies_in_the_unit_interval` allows
+    /// 1e-11 for exactly this.
+    #[test]
+    #[ignore = "known bug: cdf exceeds 1 by up to 8e-13"]
+    fn cdf_exceeds_one() {
+        let d = create_ok(294, 34, 34);
+        assert!(d.cdf(22) <= 1.0, "cdf(22) = {:.17e}", d.cdf(22));
+    }
 }

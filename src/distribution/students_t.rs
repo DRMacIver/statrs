@@ -1204,4 +1204,17 @@ mod tests {
         let d = StudentsT::new(0.0, 1.0, 12.0).unwrap();
         assert_eq!(d.inverse_cdf(1.0), f64::INFINITY);
     }
+
+    /// KNOWN BUG (unfiled): `StudentsT::cdf` decreases near its location — by
+    /// one ulp at ordinary degrees of freedom and by eight at a freedom of
+    /// 1e-8, where `beta_reg`'s small-shape error reaches the `nu/2` shape.
+    /// `internal::hegel_props::cdf_is_nondecreasing` allows sixteen ulps of a
+    /// value in `[0, 1]` for exactly this.
+    #[test]
+    #[ignore = "known bug: cdf is non-monotone by a few ulps near the location"]
+    fn cdf_decreases_near_the_location() {
+        let d = create_ok(-1.0, 36.51741272548377, 1e-8);
+        let (far, near) = (d.cdf(-1e-10), d.cdf(-1e-15));
+        assert!(far <= near, "cdf(-1e-10) = {far:.17e} > cdf(-1e-15) = {near:.17e}");
+    }
 }

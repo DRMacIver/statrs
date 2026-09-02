@@ -37,6 +37,29 @@ pub fn gen_harmonic(n: u64, m: f64) -> f64 {
 mod tests {
     use crate::prec;
     use super::*;
+    use hegel::generators;
+
+    /// `harmonic` goes through `digamma`; `gen_harmonic` sums the series
+    /// directly. At order 1 they are the same number, so each is an independent
+    /// oracle for the other.
+    ///
+    /// `n <= 1e5` bounds the runtime of the summing side, not the domain of
+    /// either function. The tolerance covers the naive summation's accumulated
+    /// rounding (worst observed 7.8e-15 relative, at n = 1e5).
+    #[hegel::test]
+    fn harmonic_matches_the_summed_series_at_order_one(tc: hegel::TestCase) {
+        let n = tc.draw(generators::integers::<u64>().max_value(100_000));
+        prec::assert_relative_eq!(harmonic(n), gen_harmonic(n, 1.0), max_relative = 1e-13);
+    }
+
+    /// At order 0 every term of `1 + 1/2^m + ... + 1/n^m` is 1, so the sum
+    /// counts its own terms. Exact, and pins the number of terms against an
+    /// off-by-one in the summation range.
+    #[hegel::test]
+    fn gen_harmonic_at_order_zero_counts_its_terms(tc: hegel::TestCase) {
+        let n = tc.draw(generators::integers::<u64>().min_value(1).max_value(100_000));
+        assert_eq!(gen_harmonic(n, 0.0), n as f64);
+    }
 
     #[test]
     fn test_harmonic() {

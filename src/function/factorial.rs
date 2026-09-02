@@ -107,6 +107,91 @@ const FCACHE: [f64; MAX_FACTORIAL + 1] = {
 mod tests {
     use super::*;
     use crate::prec;
+    use hegel::generators;
+
+    /// `n choose k` in exact integer arithmetic. `n <= 120` keeps every partial
+    /// product inside `u128`.
+    fn exact_binomial(n: u64, k: u64) -> u128 {
+        if k > n { return 0; }
+        let k = u128::from(k.min(n - k));
+        (0..k).fold(1u128, |acc, i| acc * (u128::from(n) - i) / (i + 1))
+    }
+
+    /// `binomial` rounds `exp(ln_binomial(n, k))` to the nearest integer, so it
+    /// is checked against exact integer arithmetic.
+    ///
+    /// The tolerance is the accuracy `ln_factorial` can support: its result is
+    /// good to a few ulps of `ln(n!)`, at most ~2e-13 absolute for `n <= 170`,
+    /// which exponentiates into a relative error of the same size. `n <= 120` is
+    /// the range over which the `u128` oracle cannot overflow. Rounding to an
+    /// integer contributes the additive 1.
+    #[hegel::test]
+    fn binomial_matches_exact_integer_arithmetic(tc: hegel::TestCase) {
+        let n = tc.draw(generators::integers::<u64>().max_value(120));
+        let k = tc.draw(generators::integers::<u64>().max_value(130));
+        let expected = exact_binomial(n, k) as f64;
+        prec::assert_abs_diff_eq!(
+            binomial(n, k),
+            expected,
+            epsilon = 1e-12 * expected + 1.0
+        );
+    }
+
+    /// `ln(n!) = ln((n-1)!) + ln(n)`. `ln_factorial` reads a cached exact
+    /// factorial below 171 and calls `ln_gamma` above it, so this crosses that
+    /// seam. Both sides are of size `ln(n!)`, so the crate's default relative
+    /// accuracy applies (worst observed 3.8e-16 up to `n = 1e18`).
+    #[hegel::test]
+    fn ln_factorial_satisfies_the_factorial_recurrence(tc: hegel::TestCase) {
+        let n = tc.draw(generators::integers::<u64>().max_value(u64::MAX - 1));
+        prec::assert_relative_eq!(
+            ln_factorial(n + 1),
+            ln_factorial(n) + ((n + 1) as f64).ln(),
+            epsilon = 1e-13
+        );
+    }
+
+    /// `n choose n1, n2, ...` telescopes into a product of binomial
+    /// coefficients: `C(n1+n2, n2) * C(n1+n2+n3, n3) * ...`.
+    ///
+    /// Both sides exponentiate a sum of `ln_factorial` values and round to an
+    /// integer, so the agreement is relative at `ln_factorial`'s accuracy
+    /// (~2e-13) rather than exact; the additive 1 covers those roundings.
+    #[hegel::test]
+    fn multinomial_matches_a_product_of_binomial_coefficients(tc: hegel::TestCase) {
+        let parts: Vec<u64> = tc.draw(
+            generators::vecs(generators::integers::<u64>().max_value(8))
+                .min_size(1)
+                .max_size(6),
+        );
+        let n: u64 = parts.iter().sum();
+        let mut expected = 1.0;
+        let mut taken = 0;
+        for &part in &parts {
+            taken += part;
+            expected *= binomial(taken, part);
+        }
+        prec::assert_abs_diff_eq!(
+            multinomial(n, &parts),
+            expected,
+            epsilon = 1e-11 * expected + 1.0
+        );
+    }
+
+    /// `checked_multinomial` is documented to return `None` exactly when the
+    /// parts do not sum to `n`, so the property is two-sided: a validator that
+    /// rejects a valid partition is as wrong as one that accepts an invalid one.
+    #[hegel::test]
+    fn checked_multinomial_is_some_exactly_when_the_parts_sum_to_n(tc: hegel::TestCase) {
+        let parts: Vec<u64> = tc.draw(
+            generators::vecs(generators::integers::<u64>().max_value(10)).max_size(6),
+        );
+        let n = tc.draw(generators::integers::<u64>().max_value(60));
+        assert_eq!(
+            checked_multinomial(n, &parts).is_some(),
+            parts.iter().sum::<u64>() == n
+        );
+    }
 
     #[test]
     fn test_fcache() {

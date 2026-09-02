@@ -753,6 +753,113 @@ fn erf_inv_impl(p: f64, q: f64, s: f64) -> f64 {
 mod tests {
     use super::*;
     use crate::prec;
+    use hegel::generators;
+
+    /// `erf'(x)`, used to turn the representation error of an `erf`/`erfc`
+    /// value into the accuracy with which any inverse can recover `x` from it.
+    fn erf_derivative(x: f64) -> f64 {
+        2.0 / core::f64::consts::PI.sqrt() * (-x * x).exp()
+    }
+
+    /// The gap between `v` and the next float above it. Deep in a tail `erfc`
+    /// returns a subnormal, whose spacing is many orders of magnitude coarser
+    /// than `eps * v`.
+    fn spacing(v: f64) -> f64 {
+        v.abs().next_up() - v.abs()
+    }
+
+    /// A signed `x` drawn log-uniformly from `[-10^hi_negative, 10^hi_positive]`
+    /// magnitudes down to 1e-300, for the inverse round-trips below.
+    ///
+    /// The bounds are where `erf`/`erfc` stop resolving `x` at all: `erf`
+    /// rounds to 1 above 5.9216, `erfc` rounds to 2 below -5.8636 and to 0
+    /// above 27.2367. An unbounded float generator spends most of its draws
+    /// outside that band, which would leave the round-trip filtering away
+    /// nearly every input.
+    fn resolving_argument(tc: &hegel::TestCase, hi_negative: f64, hi_positive: f64) -> f64 {
+        let negative = tc.draw(generators::booleans());
+        let hi = if negative { hi_negative } else { hi_positive };
+        let m = 10f64.powf(
+            tc.draw(
+                generators::floats::<f64>()
+                    .min_value(-300.0)
+                    .max_value(hi.log10()),
+            ),
+        );
+        if negative { -m } else { m }
+    }
+
+    /// `erf` is increasing on the whole real line. `erf_impl` splits `[0, 110)`
+    /// across fourteen rational approximations, each with its own hand-written
+    /// coefficients and interval endpoint, so any endpoint or coefficient that
+    /// does not line up shows here. Exact: an ordering, not an approximation.
+    #[hegel::test]
+    fn erf_is_nondecreasing(tc: hegel::TestCase) {
+        let a = tc.draw(generators::floats::<f64>().allow_nan(false));
+        let b = tc.draw(generators::floats::<f64>().allow_nan(false));
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        assert!(erf(lo) <= erf(hi), "erf({lo:e}) = {} > erf({hi:e}) = {}", erf(lo), erf(hi));
+    }
+
+    /// `erfc(x) = 1 - erf(x)`, including at the infinities where both are
+    /// special-cased. `erf_impl` reflects negative `x` differently for the two
+    /// (`-erf(-x)` against `2 - erfc(-x)`), so a branch that does not line up
+    /// breaks the sum by far more than the rounding the ULPs check allows.
+    #[hegel::test]
+    fn erfc_is_the_complement_of_erf(tc: hegel::TestCase) {
+        let x = tc.draw(generators::floats::<f64>().allow_nan(false));
+        prec::assert_ulps_eq!(erf(x) + erfc(x), 1.0);
+    }
+
+    /// `erf_inv` inverts `erf`, wherever `erf(x)` has not saturated to +-1 and
+    /// so still identifies `x`.
+    ///
+    /// Tolerance: `erf(x)` is a float, so it pins `x` down only to within its
+    /// own representation spacing mapped back through `erf'(x)` — the term
+    /// that dominates in the tails, where `erf'` is tiny and the value itself
+    /// may be subnormal. The `1e-12 * |x|` term covers `erf_inv`'s own
+    /// rational approximations.
+    #[hegel::test]
+    fn erf_inv_inverts_erf(tc: hegel::TestCase) {
+        let x = resolving_argument(&tc, 5.9216, 5.9216);
+        let p = erf(x);
+        tc.assume(p.abs() < 1.0);
+        let tol = 1e-12 * x.abs() + 4.0 * spacing(p) / erf_derivative(x);
+        prec::assert_abs_diff_eq!(erf_inv(p), x, epsilon = tol);
+    }
+
+    /// `erfc_inv` inverts `erfc`, wherever `erfc(x)` has not saturated to 0 or
+    /// 2. Same tolerance reasoning as `erf_inv_inverts_erf`; here the
+    /// representation term bites on both sides, near 2 on the left and in the
+    /// subnormals on the right.
+    #[hegel::test]
+    fn erfc_inv_inverts_erfc(tc: hegel::TestCase) {
+        let x = resolving_argument(&tc, 5.8636, 27.2367);
+        let q = erfc(x);
+        tc.assume(q > 0.0 && q < 2.0);
+        let tol = 1e-12 * x.abs() + 4.0 * spacing(q) / erf_derivative(x);
+        prec::assert_abs_diff_eq!(erfc_inv(q), x, epsilon = tol);
+    }
+
+    /// `erf(x) = P(1/2, x^2)` for `x > 0`, where `P` is the regularized lower
+    /// incomplete gamma function. An oracle from a different module computed by
+    /// a different method (series/continued fraction rather than rational
+    /// approximation), so the two cannot share an error.
+    ///
+    /// `x` is kept where `x * x` neither underflows nor overflows, because
+    /// `gamma_lr` rejects a second argument outside `(0, inf)`; that bounds the
+    /// oracle's argument, not `erf`'s domain. Worst observed relative
+    /// disagreement 2.9e-15.
+    #[hegel::test]
+    fn erf_matches_the_regularized_lower_incomplete_gamma(tc: hegel::TestCase) {
+        let x = tc.draw(generators::floats::<f64>().min_value(1e-150).max_value(1e150));
+        prec::assert_relative_eq!(
+            erf(x),
+            crate::function::gamma::gamma_lr(0.5, x * x),
+            epsilon = 0.0,
+            max_relative = 1e-13
+        );
+    }
 
     #[test]
     fn test_erf() {

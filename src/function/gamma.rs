@@ -436,6 +436,7 @@ fn signum(x: f64) -> f64 {
 mod tests {
     use super::*;
     use crate::prec;
+    use hegel::generators;
 
     use core::f64::consts;
 
@@ -443,6 +444,292 @@ mod tests {
     /// above `x`.
     fn ulps_above(x: f64, n: u32) -> f64 {
         (0..n).fold(x, |v, _| v.next_up())
+    }
+
+    /// A magnitude drawn log-uniformly from `[10^lo, 10^hi]`. These functions
+    /// take arguments spanning hundreds of decades, which a uniform float
+    /// generator would barely explore.
+    fn log_uniform(tc: &hegel::TestCase, lo: f64, hi: f64) -> f64 {
+        10f64.powf(tc.draw(generators::floats::<f64>().min_value(lo).max_value(hi)))
+    }
+
+    fn signed_log_uniform(tc: &hegel::TestCase, lo: f64, hi: f64) -> f64 {
+        let m = log_uniform(tc, lo, hi);
+        if tc.draw(generators::booleans()) { m } else { -m }
+    }
+
+    /// Largest shape at which the properties below evaluate `gamma_lr`/
+    /// `gamma_ur`, as a power of ten. Their series and continued fraction have
+    /// no iteration cap and take about `sqrt(a)` steps near `x == a`: 0.5ms at
+    /// `a = 1e10`, 5ms at `1e12`, and nothing usable past `1e16` (see
+    /// `gamma_lr_does_not_terminate_for_a_huge_shape`). This bounds the suite's
+    /// runtime, not the functions' domain.
+    const MAX_SHAPE_EXP: f64 = 8.0;
+
+    /// Relative accuracy `gamma` can deliver at `x`. Its `x < 0.5` branch
+    /// divides by `(PI * x).sin()` computed with no argument reduction, so the
+    /// rounding of `PI * x` reaches the result amplified by `1 / sin(PI * x)`,
+    /// which is unbounded as `x` approaches one of the poles at the
+    /// non-positive integers. Away from the poles the floor is the 1e-11 the
+    /// identities below are checked to.
+    fn gamma_relative_accuracy(x: f64) -> f64 {
+        const BASE: f64 = 1e-11;
+        if x >= 0.5 {
+            return BASE;
+        }
+        let offset = x - x.round();
+        BASE + 8.0 * f64::EPSILON * consts::PI * x.abs() / (consts::PI * offset).sin().abs()
+    }
+
+    /// `Gamma(x+1) = x * Gamma(x)`, the functional equation that defines the
+    /// gamma function. `gamma` switches to a reflected Lanczos sum below 0.5,
+    /// so a step across that seam relates the two branches.
+    ///
+    /// Tolerance: the docs claim 16 significant digits, but the reflected
+    /// branch loses more than that near the poles. The worst relative
+    /// disagreement observed over `|x| <= 170` (where `gamma` still returns a
+    /// finite value) is 1.8e-13, so 1e-11 leaves ~50x.
+    #[hegel::test]
+    fn gamma_satisfies_the_functional_equation(tc: hegel::TestCase) {
+        let x = signed_log_uniform(&tc, -300.0, 2.4);
+        // The gamma function has poles at the non-positive integers.
+        tc.assume(!(x <= 0.0 && x.fract() == 0.0));
+        let expected = x * gamma(x);
+        tc.assume(expected.is_finite() && expected != 0.0);
+        tc.assume(gamma(x + 1.0).is_finite());
+        let max_relative = gamma_relative_accuracy(x).max(gamma_relative_accuracy(x + 1.0));
+        prec::assert_relative_eq!(gamma(x + 1.0), expected, epsilon = 0.0, max_relative = max_relative);
+    }
+
+    /// Euler's reflection formula, `Gamma(x) * Gamma(1-x) = pi / sin(pi*x)`.
+    /// For `x` in `(0, 0.5)` this evaluates one factor on each side of
+    /// `gamma`'s branch, so the two Lanczos sums must agree. Same tolerance
+    /// reasoning as `gamma_satisfies_the_functional_equation` (worst observed
+    /// 1.1e-13).
+    ///
+    /// `sin(pi*x)` is evaluated from `x`'s distance to the nearest integer:
+    /// `pi * x` rounds, and for `x` of any size that rounding swamps the sine
+    /// near its zeros, which would put the error in the test's oracle rather
+    /// than in `gamma`. Integer `x` is excluded outright — both sides have a
+    /// pole there.
+    #[hegel::test]
+    fn gamma_satisfies_the_reflection_formula(tc: hegel::TestCase) {
+        let x = signed_log_uniform(&tc, -300.0, 2.4);
+        let offset = x - x.round();
+        tc.assume(offset != 0.0);
+        let sin_pi_x = if (x.round() as i64) % 2 == 0 {
+            (consts::PI * offset).sin()
+        } else {
+            -(consts::PI * offset).sin()
+        };
+        let product = gamma(x) * gamma(1.0 - x);
+        let expected = consts::PI / sin_pi_x;
+        tc.assume(product.is_finite() && product != 0.0 && expected.is_finite());
+        let max_relative = gamma_relative_accuracy(x).max(gamma_relative_accuracy(1.0 - x));
+        prec::assert_relative_eq!(product, expected, epsilon = 0.0, max_relative = max_relative);
+    }
+
+    /// `ln_gamma` and `gamma` are separate transcriptions of the same Lanczos
+    /// approximation, so `ln_gamma(x)` must be the log of `gamma(x)` wherever
+    /// the latter is finite and positive.
+    ///
+    /// Tolerance: taking the log of a value carrying ~eps relative error costs
+    /// ~eps absolute, and `ln_gamma`'s own result carries ulps of its
+    /// magnitude; `1e-13 * max(1, |ln Gamma|)` is ~50x the worst observed.
+    #[hegel::test]
+    fn ln_gamma_is_the_logarithm_of_gamma(tc: hegel::TestCase) {
+        let x = signed_log_uniform(&tc, -300.0, 2.4);
+        let g = gamma(x);
+        tc.assume(g.is_finite() && g > 0.0);
+        let expected = g.ln();
+        // Taking the log of a value with relative error `r` costs `r`
+        // absolute, so `gamma`'s pole conditioning enters additively here.
+        let epsilon = gamma_relative_accuracy(x) + 1e-13 * expected.abs().max(1.0);
+        prec::assert_abs_diff_eq!(ln_gamma(x), expected, epsilon = epsilon);
+    }
+
+    /// `P(a,x) + Q(a,x) = 1`. Outside `x < 1 || x <= a` — where `gamma_ur`
+    /// returns `1 - gamma_lr` outright — the two run separate continued
+    /// fractions, and that is where the property has teeth.
+    ///
+    /// Tolerance: both loops stop at a relative increment of `eps = 1e-15` and
+    /// both results lie in `[0, 1]`, so the sum is good to a few 1e-15
+    /// absolute; worst observed 3.3e-15.
+    ///
+    /// Shape floored at 1e-10, see `gamma_lr_exceeds_one_for_a_tiny_shape`:
+    /// below that the two disagree by ~1.5e-13.
+    #[hegel::test]
+    fn gamma_lr_and_gamma_ur_are_complementary(tc: hegel::TestCase) {
+        let a = log_uniform(&tc, -10.0, MAX_SHAPE_EXP);
+        let x = log_uniform(&tc, -300.0, MAX_SHAPE_EXP);
+        prec::assert_abs_diff_eq!(gamma_lr(a, x) + gamma_ur(a, x), 1.0, epsilon = 1e-13);
+    }
+
+    /// Absolute accuracy `gamma_lr`/`gamma_ur` can deliver at `(a, x)`.
+    ///
+    /// Both exponentiate `a*ln(x) - x - ln_gamma(a)`. Those three terms are of
+    /// size `a*ln(a)` while their difference is O(1), so the rounding of the
+    /// large terms survives as an absolute error in the exponent and hence a
+    /// relative error in the result: about 2e-7 at `a = x = 1e8`, and total
+    /// loss of accuracy around `a = 1e16`. Also switching branches at `x == 1`
+    /// and `x == a` moves the answer by that much.
+    fn gamma_lr_accuracy(a: f64, x: f64) -> f64 {
+        8.0 * f64::EPSILON * (a * x.ln().abs() + x + ln_gamma(a).abs()).max(1.0)
+    }
+
+    /// `P(a, .)` is the cdf of a gamma distribution, hence non-decreasing in
+    /// `x`, up to the accuracy `gamma_lr_accuracy` allows.
+    ///
+    /// Shape floored at 1e-10, see `gamma_lr_exceeds_one_for_a_tiny_shape`.
+    #[hegel::test]
+    fn gamma_lr_is_nondecreasing_in_x(tc: hegel::TestCase) {
+        let a = log_uniform(&tc, -10.0, MAX_SHAPE_EXP);
+        let x1 = log_uniform(&tc, -300.0, MAX_SHAPE_EXP);
+        let x2 = log_uniform(&tc, -300.0, MAX_SHAPE_EXP);
+        let (lo, hi) = if x1 <= x2 { (x1, x2) } else { (x2, x1) };
+        let slack = gamma_lr_accuracy(a, lo).max(gamma_lr_accuracy(a, hi));
+        assert!(
+            gamma_lr(a, lo) <= gamma_lr(a, hi) + slack,
+            "gamma_lr({a:e}, {lo:e}) = {} > gamma_lr({a:e}, {hi:e}) = {} (slack {slack:e})",
+            gamma_lr(a, lo),
+            gamma_lr(a, hi)
+        );
+    }
+
+    /// `P(a, x)` is non-increasing in the shape `a`: more shape moves mass to
+    /// the right, so less of it sits below a fixed `x`. Same accuracy
+    /// allowance as `gamma_lr_is_nondecreasing_in_x`.
+    ///
+    /// Shape floored at 1e-10, see `gamma_lr_exceeds_one_for_a_tiny_shape`.
+    #[hegel::test]
+    fn gamma_lr_is_nonincreasing_in_the_shape(tc: hegel::TestCase) {
+        let x = log_uniform(&tc, -300.0, MAX_SHAPE_EXP);
+        let a1 = log_uniform(&tc, -10.0, MAX_SHAPE_EXP);
+        let a2 = log_uniform(&tc, -10.0, MAX_SHAPE_EXP);
+        let (lo, hi) = if a1 <= a2 { (a1, a2) } else { (a2, a1) };
+        let slack = gamma_lr_accuracy(lo, x).max(gamma_lr_accuracy(hi, x));
+        assert!(
+            gamma_lr(lo, x) + slack >= gamma_lr(hi, x),
+            "gamma_lr({lo:e}, {x:e}) = {} < gamma_lr({hi:e}, {x:e}) = {} (slack {slack:e})",
+            gamma_lr(lo, x),
+            gamma_lr(hi, x)
+        );
+    }
+
+    /// `P(a,x)` is a probability.
+    ///
+    /// The shape is floored at 1e-10: below `a ~ 2.5e-14` the series overshoots
+    /// 1 by a few 1e-14, pinned by `gamma_lr_exceeds_one_for_a_tiny_shape`.
+    #[hegel::test]
+    fn gamma_lr_lies_in_the_unit_interval(tc: hegel::TestCase) {
+        let a = log_uniform(&tc, -10.0, MAX_SHAPE_EXP);
+        let x = log_uniform(&tc, -300.0, MAX_SHAPE_EXP);
+        let p = gamma_lr(a, x);
+        assert!((0.0..=1.0).contains(&p), "gamma_lr({a:e}, {x:e}) = {p:.17e}");
+    }
+
+    /// At integer shape `n`, `P(n, x) = 1 - exp(-x) * sum_{k<n} x^k / k!` — the
+    /// probability that a Poisson variable with mean `x` is at least `n`. The
+    /// oracle is a finite sum of positive terms with no cancellation, and
+    /// touches neither `ln_gamma` nor the continued fraction.
+    ///
+    /// `n <= 30` and `x <= 100` keep the oracle's terms well scaled; worst
+    /// observed absolute disagreement 3.7e-14.
+    #[hegel::test]
+    fn gamma_lr_matches_the_poisson_tail_at_an_integer_shape(tc: hegel::TestCase) {
+        let n = tc.draw(generators::integers::<u32>().min_value(1).max_value(30));
+        let x = log_uniform(&tc, -10.0, 2.0);
+        let mut term = (-x).exp();
+        let mut below = term;
+        for k in 1..n {
+            term *= x / f64::from(k);
+            below += term;
+        }
+        prec::assert_abs_diff_eq!(gamma_lr(f64::from(n), x), 1.0 - below, epsilon = 1e-12);
+    }
+
+    /// `psi(x+1) = psi(x) + 1/x`, the digamma recurrence.
+    ///
+    /// Tolerance: for small `x` the right-hand side is `-1/x + 1/x` and cancels
+    /// almost completely, so the accuracy available is relative to the largest
+    /// term rather than to the result. 1e-14 times that cancellation scale is
+    /// ~25x the worst observed.
+    #[hegel::test]
+    fn digamma_satisfies_the_recurrence(tc: hegel::TestCase) {
+        let x = log_uniform(&tc, -300.0, 300.0);
+        let (next, here) = (digamma(x + 1.0), digamma(x));
+        tc.assume(next.is_finite() && here.is_finite());
+        let scale = next.abs() + here.abs() + (1.0 / x).abs();
+        prec::assert_abs_diff_eq!(next, here + 1.0 / x, epsilon = 1e-14 * scale);
+    }
+
+    /// `inv_digamma` inverts `digamma`.
+    ///
+    /// Tolerance: `inv_digamma` bisects from `exp(x)` with steps halving from
+    /// 1.0 down to 1e-15, so its result carries ~1e-15 absolute error plus
+    /// whatever `digamma` contributes; 1e-12 relative covers the latter (worst
+    /// observed 5.7e-15 relative, at `x ~ 1e270`).
+    #[hegel::test]
+    fn inv_digamma_inverts_digamma(tc: hegel::TestCase) {
+        let x = log_uniform(&tc, -300.0, 300.0);
+        let d = digamma(x);
+        tc.assume(d.is_finite());
+        prec::assert_abs_diff_eq!(inv_digamma(d), x, epsilon = 1e-12 * x.abs() + 2e-15);
+    }
+
+    /// `checked_gamma_lr` errors exactly when an argument lies outside
+    /// `(0, +inf)`, with NaN documented to pass through as a NaN result rather
+    /// than an error. Two-sided: rejecting a valid argument is as wrong as
+    /// accepting an invalid one.
+    #[hegel::test]
+    fn checked_gamma_lr_errors_exactly_outside_the_positive_reals(tc: hegel::TestCase) {
+        fn arg(tc: &hegel::TestCase) -> f64 {
+            tc.draw(hegel::one_of!(
+                generators::sampled_from(vec![
+                    0.0,
+                    -0.0,
+                    f64::NAN,
+                    f64::INFINITY,
+                    f64::NEG_INFINITY,
+                ]),
+                generators::floats::<f64>().min_value(-1e8).max_value(1e8),
+            ))
+        }
+        let a = arg(&tc);
+        let x = arg(&tc);
+        let in_domain = |v: f64| v > 0.0 && v.is_finite();
+        let result = checked_gamma_lr(a, x);
+        assert_eq!(
+            result.is_ok(),
+            a.is_nan() || x.is_nan() || (in_domain(a) && in_domain(x)),
+            "checked_gamma_lr({a:e}, {x:e}) = {result:?}"
+        );
+    }
+
+    /// KNOWN BUG (unfiled): the series `gamma_lr` runs for `x <= 1 || x <= a`
+    /// overshoots 1 for a tiny shape, so the returned value is not a
+    /// probability. Reached through `Gamma::cdf`, which makes
+    /// `Gamma(1e-30, 1).cdf(1)` exceed 1 as well. The same few-1e-14 error also
+    /// breaks monotonicity in both arguments below a shape of ~1e-13, so the
+    /// properties above floor the shape at 1e-10 (the largest offending shape
+    /// found was 2.5e-14).
+    #[test]
+    #[ignore = "known bug: gamma_lr overshoots 1 for a tiny shape"]
+    fn gamma_lr_exceeds_one_for_a_tiny_shape() {
+        let p = gamma_lr(1e-30, 1.0);
+        assert!(p <= 1.0, "gamma_lr(1e-30, 1) = {p:.17e}");
+    }
+
+    /// KNOWN BUG (unfiled): neither `gamma_lr`'s series nor its continued
+    /// fraction has an iteration cap, and near `x == a` the step count grows
+    /// like `sqrt(a)`. At `a = 1e300` it does not return in any practical time,
+    /// which would hang the whole suite. `MAX_SHAPE_EXP` keeps the properties
+    /// above eight decades below the affected region.
+    #[test]
+    #[ignore = "known bug: does not terminate; would hang the suite"]
+    fn gamma_lr_does_not_terminate_for_a_huge_shape() {
+        let p = gamma_lr(1e300, 1e300);
+        assert!((0.0..=1.0).contains(&p));
     }
 
     #[test]
